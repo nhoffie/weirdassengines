@@ -318,8 +318,24 @@ function shapesD(ph){
  add('sprocket',gearS(0,0,R0,NZ,ph,ZD-2.5,ZD+2.5));add('sprocket',gearS(-CX,CY,RC,2*NZ,pi_,ZD-2.5,ZD+2.5));add('sprocket',gearS(CX,CY,RC,2*NZ,pe,ZD-2.5,ZD+2.5));
  add('chain',chainAt(ph,ZD),{nocc:1});
  return out}
+// ---- Basic single: just the cylinder block, crankshaft with counterweights, connecting rod and piston ----
+const PARTS1=[['block','Cylinder block','#9e9e9e'],['crank','Crankshaft & counterweights','#1e88e5'],['rod','Connecting rod','#43a047'],['piston','Piston','#e53935']];
+function shapes1(ph){
+ const out=[],add=(part,o,fl)=>{o.part=part;if(fl)Object.assign(o,fl);out.push(o)};
+ const th=((ph%TAU)+TAU)%TAU,px=R*Math.sin(th),py=R*Math.cos(th),yp=py+Math.sqrt(L*L-px*px);
+ add('block',box([-50,50,40,158,-40,40]));add('block',box([-50,50,-50,40,-30,30])); // cylinder barrel, crankcase
+ add('block',cyl('y',[0,99,0],25,118),{nocc:1});add('block',box([-45,45,-45,40,-25,25]),{nocc:1}); // bore, crankcase cavity
+ add('crank',cyl('z',[0,0,25],8,22));add('crank',cyl('z',[0,0,-25],8,22)); // main journals
+ add('crank',bar([0,0],[px,py],14,8,14));add('crank',bar([0,0],[px,py],14,-14,-8)); // webs
+ add('crank',cyl('z',[px,py,0],6,16)); // crank pin
+ add('crank',sec(th,8,14));add('crank',sec(th,-14,-8)); // counterweights
+ add('rod',bar([px,py],[0,yp],8,-5,5));
+ add('piston',cyl('y',[0,yp-2.5,0],24,45),{outer:1});add('piston',cyl('z',[0,yp,0],4,48)); // piston, wrist pin
+ return out}
 const pc=x=>Math.round(x*100)+'%';
 const ENGINES={
+ basic:{label:'Basic single (block, crank, rod, piston)',parts:PARTS1,struct:new Set(['block']),cyls:1,period:TAU,shapes:shapes1,
+  read:ph=>'Crank angle: '+Math.round(((ph%TAU)+TAU)%TAU*180/Math.PI)+'°'},
  four:{label:'4-stroke inline-4',parts:PARTS4,struct:new Set(['block','head','cover']),cyls:4,period:4*Math.PI,shapes,
   read:ph=>{const dg=ph*180/Math.PI;return 'Cycle angle (cylinder 1): '+Math.round(dg)+'° ('+['intake','compression','power','exhaust'][Math.min(3,Math.floor(dg/180))]+')'}},
  diesel:{label:'4-stroke diesel single',parts:PARTSD,struct:new Set(['block','head','cover']),cyls:1,period:4*Math.PI,shapes:shapesD,
