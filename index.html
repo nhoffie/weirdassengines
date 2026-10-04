@@ -319,7 +319,7 @@ function shapesD(ph){
  add('chain',chainAt(ph,ZD),{nocc:1});
  return out}
 // ---- Basic single: just the cylinder block, crankshaft with counterweights, connecting rod and piston ----
-const PARTS1=[['block','Cylinder block','#9e9e9e'],['crank','Crankshaft & counterweights','#1e88e5'],['rod','Connecting rod','#43a047'],['piston','Piston','#e53935']];
+const PARTS1=[['block','Cylinder block','#9e9e9e'],['crank','Crankshaft & counterweights','#1e88e5'],['rod','Connecting rod','#43a047'],['piston','Piston','#e53935'],['injector','Injectors','#5e35b1']];
 function shapes1(ph){
  const out=[],add=(part,o,fl)=>{o.part=part;if(fl)Object.assign(o,fl);out.push(o)};
  const th=((ph%TAU)+TAU)%TAU,px=R*Math.sin(th),py=R*Math.cos(th),yp=py+Math.sqrt(L*L-px*px);
@@ -331,6 +331,7 @@ function shapes1(ph){
  add('crank',sec(th,8,14));add('crank',sec(th,-14,-8)); // counterweights
  add('rod',bar([px,py],[0,yp],8,-5,5));
  add('piston',cyl('y',[0,yp-2.5,0],24,45),{outer:1});add('piston',cyl('z',[0,yp,0],4,48)); // piston, wrist pin
+ for(const sx of[-1,1]){add('injector',cyl('y',[sx*37,170,0],5,24));add('injector',bar([sx*37,160],[sx*22,155],3,-1.5,1.5))} // two abstract injectors on the cylinder top: body plus nozzle angled into the bore
  return out}
 const pc=x=>Math.round(x*100)+'%';
 const ENGINES={
