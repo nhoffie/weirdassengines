@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Four-Stroke Engine – Step 1</title>
+<style>
+:root{color-scheme:light dark;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{font-family:sans-serif;margin:8px}
+.views{display:grid;grid-template-areas:"iso top . ." "left front right rear" ". bottom . .";justify-content:start;align-items:start;gap:8px;overflow-x:auto}
+figure{margin:0}figcaption{font-size:12px}
+canvas{border:1px solid gray}canvas.free{touch-action:none;cursor:grab}
+</style></head><body>
+<div id="tabs"></div>
+<div>
+<button id="play">Pause</button> <button id="reset">Reset views</button> <label><input type="checkbox" id="lock" checked> Lock pan/zoom</label>
+RPM <input id="rpm" type="range" min="1" max="60" value="15"> <span id="rv">15</span>
+&nbsp; <span id="ang"></span>
+</div>
+<div id="legend"></div>
+<div>Solid = visible. Dashed = behind 1 part; short dashes = behind 2; dots = behind 3+. The menu beside each part sets how its occluded lines are drawn. Structural parts (block, cylinder, head, valve cover) are not part of this scheme, so their lines are always solid.</div>
+<div class="views" id="views"></div>
+<script>
+const S=1.25, R=30, L=100; // crank radius, rod length (world units)
+// Orthographic views in third-angle layout: top above front, bottom below, left/right/rear alongside. sg = -1 when the viewer looks from the negative side of the axis.
+const views=[
+ {n:'Front',ax:'z',sg:1,area:'front',w:320,h:400,p:(x,y,z)=>[160+x*S,318-y*S]},
+ {n:'Right',ax:'x',sg:1,area:'right',w:400,h:400,p:(x,y,z)=>[200-z*S,318-y*S]},
+ {n:'Left',ax:'x',sg:-1,area:'left',w:400,h:400,p:(x,y,z)=>[200+z*S,318-y*S]},
+ {n:'Rear',ax:'z',sg:-1,area:'rear',w:320,h:400,p:(x,y,z)=>[160-x*S,318-y*S]},
+ {n:'Top',ax:'y',sg:1,area:'top',w:320,h:390,p:(x,y,z)=>[160+x*S,205+z*S]},
+ {n:'Bottom',ax:'y',sg:-1,area:'bottom',w:320,h:390,p:(x,y,z)=>[160+x*S,185-z*S]},
+ {n:'Isometric',ax:'iso',iso:1,area:'iso',w:320,h:400,p:(x,y,z)=>[160+(x-z)*.6,257-(2*y-x-z)*.347],d:(x,y,z)=>x+y+z}];
+let locked=true,dirty=true; // dirty: redraw needed while paused
+['input','change','click','pointermove','wheel','dblclick'].forEach(t=>document.addEventListener(t,()=>dirty=true,true));
+const host=document.getElementById('views');
+views.forEach(v=>{const f=document.createElement('figure'),c=document.createElement('canvas');
+ c.width=v.w;c.height=v.h;v.ctx=c.getContext('2d');
+ const t=document.createElement('figcaption');t.textContent=v.n;f.style.gridArea=v.area;f.append(c,t);host.append(f);v.c=c;new IntersectionObserver(es=>es.forEach(e=>{v.vis=e.isIntersecting;dirty=true})).observe(c); // skip drawing views scrolled off screen
+ 
+ v.z=1;v.tx=0;v.ty=0;const ptrs=new Map(),sc=()=>c.width/c.getBoundingClientRect().width;
+ const zoomAt=(mx,my,f)=>{const nz=Math.min(12,Math.max(.3,v.z*f)),k=nz/v.z;v.tx=mx-(mx-v.tx)*k;v.ty=my-(my-v.ty)*k;v.z=nz};
+ const pos=e=>{const r=c.getBoundingClientRect();return [(e.clientX-r.left)*sc(),(e.clientY-r.top)*sc()]};
+ c.addEventListener('wheel',e=>{if(locked)return;e.preventDefault();const [mx,my]=pos(e);zoomAt(mx,my,Math.exp(-e.deltaY*.0015))},{passive:false});
+ c.addEventListener('pointerdown',e=>{if(locked)return;c.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,pos(e));v.pd=null});
+ c.addEventListener('pointermove',e=>{if(!ptrs.has(e.pointerId))return;const o=ptrs.get(e.pointerId),p=pos(e);ptrs.set(e.pointerId,p);
+  if(ptrs.size===1){v.tx+=p[0]-o[0];v.ty+=p[1]-o[1]}
+  else if(ptrs.size===2){const [a,b]=[...ptrs.values()],d=Math.hypot(a[0]-b[0],a[1]-b[1]),m=[(a[0]+b[0])/2,(a[1]+b[1])/2];
+   if(v.pd){v.tx+=m[0]-v.pm[0];v.ty+=m[1]-v.pm[1];zoomAt(m[0],m[1],d/v.pd)}v.pd=d;v.pm=m}});
+ const up=e=>{ptrs.delete(e.pointerId);v.pd=null};c.addEventListener('pointerup',up);c.addEventListener('pointercancel',up);
+ c.addEventListener('dblclick',()=>{if(locked)return;v.z=1;v.tx=0;v.ty=0})});
+document.getElementById('lock').onchange=e=>{locked=e.target.checked;views.forEach(v=>v.c.classList.toggle('free',!locked))};
+document.getElementById('reset').onclick=()=>views.forEach(v=>{v.z=1;v.tx=0;v.ty=0});
+
+const box=(b,col,hid)=>({k:'box',b,col,hid});
+const cyl=(ax,c,r,h,col,hid)=>{const e=[r,r,r];e[{x:0,y:1,z:2}[ax]]=h/2;
+ return {k:'cyl',ax,c,r,col,hid,b:[c[0]-e[0],c[0]+e[0],c[1]-e[1],c[1]+e[1],c[2]-e[2],c[2]+e[2]]}};
+const bar=(a,b,w,z0,z1,col)=>({k:'bar',a,e:b,w,col,
+ b6:[Math.min(a[0],b[0])-w/2,Math.max(a[0],b[0])+w/2,Math.min(a[1],b[1])-w/2,Math.max(a[1],b[1])+w/2,z0,z1]});
+
+const sec=(th,z0,z1,col)=>{const r=36,h=1.0,u=[-Math.sin(th),-Math.cos(th)],pts=[[0,0]];
+ for(let i=0;i<=12;i++){const f=-h+2*h*i/12,c=Math.cos(f),n=Math.sin(f);pts.push([r*(u[0]*c-u[1]*n),r*(u[0]*n+u[1]*c)])}
+ const xs=pts.map(p=>p[0]),ys=pts.map(p=>p[1]);
+ return {k:'sec',pts,col,b6:[Math.min(...xs),Math.max(...xs),Math.min(...ys),Math.max(...ys),z0,z1]}};
+const PARTS4=[['block','Engine block','#9e9e9e'],['crank','Crankshaft','#1e88e5'],['rod','Connecting rod','#43a047'],['piston','Piston','#e53935'],['intake','Intake valve','#00acc1'],['exhaust','Exhaust valve','#fb8c00'],['intakecam','Intake cam','#4dd0e1'],['exhaustcam','Exhaust cam','#ffb74d'],['intakerock','Intake rocker','#00838f'],['exhaustrock','Exhaust rocker','#e65100'],['rshaft','Rocker shaft','#8e24aa'],['plug','Spark plug','#d81b60'],['spark','Spark','#ffb300'],['sprocket','Timing sprockets','#6d4c41'],['chain','Timing chain','#546e7a'],['head','Cylinder head','#827717'],['cover','Valve cover','#a1887f']];
+const PARTS2=[['block','Cylinder & crankcase','#9e9e9e'],['head','Cylinder head','#827717'],['crank','Crankshaft','#1e88e5'],['rod','Connecting rod','#43a047'],['piston','Piston','#e53935'],['export','Exhaust port','#fb8c00'],['trport','Transfer ports','#1565c0'],['inport','Intake port','#00acc1'],['plug','Spark plug','#d81b60'],['spark','Spark','#ffb300']];
+let PARTS,STRUCT,PIX,cylVis=[]; // set per engine by buildLegend; STRUCT = structural parts (always solid, never occlude)
+const COL={},vis={},mode={},cbs={},sels={};
+const lg=document.getElementById('legend');
+function buildLegend(E){
+ PARTS=E.parts;STRUCT=E.struct;PIX={};PARTS.forEach(([k],i)=>PIX[k]=1<<i);cylVis=Array(E.cyls).fill(true);lg.innerHTML='';
+ PARTS.forEach(([k,n,c])=>{COL[k]=c;vis[k]=true;
+  const l=document.createElement('label'),i=document.createElement('input');
+  i.type='checkbox';i.checked=true;i.onchange=()=>vis[k]=i.checked;cbs[k]=i;
+  const sw=document.createElement('span');sw.textContent=' ■ ';sw.style.color=c;
+  l.append(i,sw,n+'  ');
+  mode[k]='hidden';const sel=document.createElement('select');
+  ['dashed','solid','hidden'].forEach(o=>sel.add(new Option(o)));
+  sel.value='hidden';sel.onchange=()=>mode[k]=sel.value;sels[k]=sel;
+  const d=document.createElement('div');d.append(l);if(!STRUCT.has(k))d.append('when occluded: ',sel);lg.append(d)});
+ const row=document.createElement('div'),b=(t,fn)=>{const x=document.createElement('button');x.textContent=t;x.onclick=fn;return x};
+ const setAll=v=>PARTS.forEach(([k])=>{vis[k]=v;cbs[k].checked=v});
+ const all=document.createElement('select');['set all: when occluded…','dashed','solid','hidden'].forEach(o=>all.add(new Option(o)));
+ all.onchange=()=>{if(all.selectedIndex){PARTS.forEach(([k])=>{mode[k]=all.value;sels[k].value=all.value})}all.selectedIndex=0};
+ row.append(b('Show all',()=>setAll(true)),b('Hide all',()=>setAll(false)),' ',all);lg.prepend(row);
+ if(E.cyls>1){const cr=document.createElement('div');cr.append('Cylinders: ');
+  cylVis.forEach((_,n)=>{const l=document.createElement('label'),i=document.createElement('input');i.type='checkbox';i.checked=true;i.onchange=()=>cylVis[n]=i.checked;l.append(i,' '+(n+1)+'  ');cr.append(l)});
+  row.after(cr)}
+ dirty=true}
+const PN=['block','block','block','crank','crank','crank','crank','crank','crank','crank','rod','piston','piston','intake','intake','exhaust','exhaust','intakecam','intakecam','exhaustcam','exhaustcam','intakerock','intakerock','exhaustrock','exhaustrock','rshaft'];
+// Valve train: each cam turns a roller on a rocker arm; the rocker pivots on a shared rocker shaft and its tip presses the valve stem.
+const TAU=2*Math.PI,RB=7,RR=3,RN=1.5,D=11.5,CX=14.5,LP=11,LT=15.5,YP=216,CY=YP+Math.sqrt((RB+RR)**2-(CX-LP)**2); // cam: base circle RB + nose circle RN at distance D (lobe height D+RN-RB = 6); roller radius RR; cam x = CX, roller arm LP, valve (tip) arm LT; pivot height YP
+// Cam outline = convex hull of the base circle and the nose circle (tangent cam: smooth, no concavity). The nose points straight down at mid-lift.
+const WN=sd=>Math.atan2(-(sd*LP-sd*CX),CY-YP); // direction from cam centre to its roller
+const noseC=(cx,cy,psi,w)=>{const a=psi-Math.PI/4+w;return [cx-D*Math.sin(a),cy-D*Math.cos(a)]};
+const camShape=(cx,cy,psi,z0,z1,sd)=>{const w=WN(sd),[nx,ny]=noseC(cx,cy,psi,w),P=[];
+ for(let i=0;i<48;i++)P.push([cx+RB*Math.cos(TAU*i/48),cy+RB*Math.sin(TAU*i/48)]);
+ for(let i=0;i<16;i++)P.push([nx+RN*Math.cos(TAU*i/16),ny+RN*Math.sin(TAU*i/16)]);
+ const pts=hull(P),n=pts.length,xs=pts.map(p=>p[0]),ys=pts.map(p=>p[1]);
+ const a=psi-Math.PI/4+w,th0=Math.atan2(-Math.cos(a),-Math.sin(a)),ph0=Math.acos((RB-RN)/D),ex=[];
+ for(const sg of[-1,1]){const dx=Math.cos(th0+sg*ph0),dy=Math.sin(th0+sg*ph0);ex.push([cx+RB*dx,cy+RB*dy],[nx+RN*dx,ny+RN*dy])} // where the flanks meet the base and nose arcs
+ return {k:'sec',pts,conn:[],ex,b6:[Math.min(...xs),Math.max(...xs),Math.min(...ys),Math.max(...ys),z0,z1]}};
+// rocker angle a: the roller (radius RR) must touch the cam. Its centre lies on the cam outline offset by RR,
+// i.e. the hull of two discs; signed distance = min over discs interpolated between base and nose.
+// sd=-1 intake (left), +1 exhaust (right)
+function rockAngle(sd,psi){
+ const c1=[sd*CX,CY],c2=noseC(c1[0],c1[1],psi,WN(sd)),r1=RB+RR,r2=RN+RR;
+ const f=a=>{const x=sd*LP*Math.cos(a),y=YP-LP*Math.sin(a);let m=1e9;
+  for(let k=0;k<=48;k++){const t=k/48,d=Math.hypot(x-(c1[0]+t*(c2[0]-c1[0])),y-(c1[1]+t*(c2[1]-c1[1])))-(r1+t*(r2-r1));if(d<m)m=d}return m};
+ let lo=0,hi=0.9;for(let i=0;i<30;i++){const m=(lo+hi)/2;f(m)<0?lo=m:hi=m}return lo}
+// Timing drive: crank sprocket (14 teeth) drives both cam sprockets (28 teeth) by a chain, giving the 2:1 speed ratio.
+const R0=6.6,RC=13.2,NZ=14,ZS=-150;
+const cd=(()=>{const d=[-CX,-CY],D=Math.hypot(...d),ad=Math.atan2(d[1],d[0]),pa=Math.acos((RC-R0)/D);
+ const cand=[ad+pa,ad-pa].map(a=>[Math.cos(a),Math.sin(a)]),n=cand[0][0]>cand[1][0]?cand[0]:cand[1],gR=Math.atan2(n[0],n[1]),nL=[-n[0],n[1]];
+ const segs=[ // chain path = hull of the three pitch circles, run clockwise
+  {t:'l',a:[-CX,CY+RC],b:[CX,CY+RC],o:[0,1]},{t:'a',c:[CX,CY],r:RC,g0:0,g1:gR},
+  {t:'l',a:[CX+RC*n[0],CY+RC*n[1]],b:[R0*n[0],R0*n[1]],o:n},{t:'a',c:[0,0],r:R0,g0:gR,g1:TAU-gR},
+  {t:'l',a:[R0*nL[0],R0*nL[1]],b:[-CX+RC*nL[0],CY+RC*nL[1]],o:nL},{t:'a',c:[-CX,CY],r:RC,g0:TAU-gR,g1:TAU}];
+ let tot=0;segs.forEach(g=>{g.len=g.t==='l'?Math.hypot(g.b[0]-g.a[0],g.b[1]-g.a[1]):g.r*(g.g1-g.g0);g.s0=tot;tot+=g.len});return {segs,tot}})();
+function pathAt(s,off){s=((s%cd.tot)+cd.tot)%cd.tot;const g=cd.segs.find(q=>s<=q.s0+q.len)||cd.segs[5],u=s-g.s0;
+ if(g.t==='l'){const f=u/g.len;return [g.a[0]+(g.b[0]-g.a[0])*f+g.o[0]*off,g.a[1]+(g.b[1]-g.a[1])*f+g.o[1]*off]}
+ const a=g.g0+u/g.r;return [g.c[0]+(g.r+off)*Math.sin(a),g.c[1]+(g.r+off)*Math.cos(a)]}
+const NL=Math.round(cd.tot/(TAU*R0/NZ)),PL=cd.tot/NL;
+const band=off=>{const P=[];for(let q=0;q<cd.tot;q+=2.5)P.push([...pathAt(q,off),ZS]);return {pts:P,closed:true}};
+const BANDS=[band(1.3),band(-1.3)];
+const chainShape=ph=>{const lines=BANDS.slice();for(let i=0;i<NL;i++){const q=R0*ph+i*PL;lines.push({pts:[[...pathAt(q,1.3),ZS],[...pathAt(q,-1.3),ZS]]})}return {k:'lines',lines}};
+const gearS=(cx,cy,R,N,rot,z0,z1)=>{const pts=[],p=TAU/N;
+ for(let i=0;i<N;i++){const g=i*p;for(const [o,r] of [[-.3,R-.9],[-.15,R+.9],[.15,R+.9],[.3,R-.9]]){const a=g+o*p+rot;pts.push([cx+r*Math.sin(a),cy+r*Math.cos(a)])}}
+ const xs=pts.map(q=>q[0]),ys=pts.map(q=>q[1]);return {k:'sec',pts,conn:[],ex:[],b6:[Math.min(...xs),Math.max(...xs),Math.min(...ys),Math.max(...ys),z0,z1]}};
+const ZC=[-90,-30,30,90],OFF=[0,3*Math.PI,Math.PI,2*Math.PI]; // cylinder z positions; cycle offsets give firing order 1-3-4-2
+function shapes(ph){
+ const out=[],add=(part,o,fl)=>{o.part=part;if(fl)Object.assign(o,fl);out.push(o)};
+ add('block',box([-50,50,-50,175,-120,120]),{outer:1,holes:ZC.map(z=>[0,z,25])});
+ add('block',box([-45,45,-45,40,-115,115]),{nocc:1});            // crankcase cavity
+ ZC.forEach(z=>add('block',cyl('y',[0,107.5,z],25,135),{nocc:1})); // cylinder bores
+ [-120,-60,0,60,120].forEach(z=>add('crank',cyl('z',[0,0,z],8,32))); // main journals (between the webs)
+ add('intakecam',cyl('z',[-CX,CY,-12.5],2.5,285));add('exhaustcam',cyl('z',[CX,CY,-12.5],2.5,285));
+ add('crank',cyl('z',[0,0,-143],5,14)); // crank nose
+ add('sprocket',gearS(0,0,R0,NZ,ph,ZS-2.5,ZS+2.5));add('sprocket',gearS(-CX,CY,RC,2*NZ,ph/2,ZS-2.5,ZS+2.5));add('sprocket',gearS(CX,CY,RC,2*NZ,ph/2-1.5*Math.PI,ZS-2.5,ZS+2.5));
+ add('chain',chainShape(ph),{nocc:1});add('rshaft',cyl('z',[0,YP,0],2.5,248));
+ add('head',box([-50,50,175,205,-120,120])); // cylinder head casting
+ add('cover',box([-50,50,205,245,-120,120])); // valve cover over the cams and rockers
+ ZC.forEach((z,n)=>{
+  const first=out.length;
+  const phi=ph-OFF[n],th=((phi%TAU)+TAU)%TAU,px=R*Math.sin(th),py=R*Math.cos(th),yp=py+Math.sqrt(L*L-px*px);
+  const pi_=phi/2,pe=phi/2-1.5*Math.PI,ai=rockAngle(-1,pi_),ae=rockAngle(1,pe),li=LT*Math.sin(ai),le=LT*Math.sin(ae); // valve lift = rocker tip travel
+  const tip=(sd,a)=>[sd*LT*Math.cos(a),YP-LT*Math.sin(a)],rl=(sd,a)=>[sd*LP*Math.cos(a),YP-LP*Math.sin(a)];
+  add('crank',bar([0,0],[px,py],14,z+8,z+14));add('crank',bar([0,0],[px,py],14,z-14,z-8)); // webs
+  add('crank',cyl('z',[px,py,z],6,16));                                                      // crank pin
+  add('crank',sec(th,z+8,z+14));add('crank',sec(th,z-14,z-8));                               // counterweights
+  add('rod',bar([px,py],[0,yp],8,z-5,z+5));
+  add('piston',cyl('y',[0,yp+5,z],24,30),{outer:1});add('piston',cyl('z',[0,yp,z],4,48));
+  add('intake',cyl('y',[-LT,193.5-li,z],2.5,41));add('intake',cyl('y',[-LT,173-li,z],5.5,4));
+  add('exhaust',cyl('y',[LT,193.5-le,z],2.5,41));add('exhaust',cyl('y',[LT,173-le,z],5.5,4));
+  add('intakecam',camShape(-CX,CY,pi_,z-3,z+3,-1));add('exhaustcam',camShape(CX,CY,pe,z-3,z+3,1));
+  add('intakerock',bar([0,YP],tip(-1,ai),4,z-2,z+2));add('intakerock',cyl('z',[...rl(-1,ai),z],RR,4));
+  add('exhaustrock',bar([0,YP],tip(1,ae),4,z-2,z+2));add('exhaustrock',cyl('z',[...rl(1,ae),z],RR,4));
+  add('plug',cyl('y',[0,165,z],1,4));add('plug',cyl('y',[0,179,z],4,24));  // spark plug: electrode, threaded shell
+  add('plug',cyl('y',[0,194,z],6.5,6));add('plug',cyl('y',[0,204,z],3.5,14)); // hex nut, ceramic insulator
+  add('head',cyl('x',[-32.5,190,z],5,35));add('head',cyl('x',[32.5,190,z],5,35)); // intake / exhaust ports
+  add('head',cyl('y',[-LT,190,z],4.5,30));add('head',cyl('y',[LT,190,z],4.5,30)); // valve guides
+  add('head',cyl('y',[0,190,z],8,30));                                             // spark plug well
+  add('plug',bar([3.5,167],[3.5,159],2,z-1,z+1));add('plug',bar([3.5,159],[0,159],2,z-1,z+1)); // ground electrode, bent over the centre electrode
+  const dg=(((phi*180/Math.PI)%720)+720)%720;
+  if(dg>=345&&dg<=372)add('spark',cyl('y',[0,161.5,z],2,3.5)); // spark jumps the gap from 15° before TDC (end of compression) for ~27°
+  for(let k=first;k<out.length;k++)out[k].cn=n; // tag every part of this cylinder
+ });
+ return out}
+const DASH=[[],[8,4],[4,4],[1.5,4]]; // by number of parts in front: 0 solid, 1 dashed, 2 short dashes, 3+ dotted
+function inPoly(P,x,y){let a=0,b=0;for(let i=0;i<P.length;i++){const p=P[i],q=P[(i+1)%P.length],c=(q[0]-p[0])*(y-p[1])-(q[1]-p[1])*(x-p[0]);c>0?a++:c<0&&b++}return !(a&&b)}
+function inside(r,x,y){
+ if(r.holes&&r.holes.some(h=>Math.hypot(x-h.cx,y-h.cy)<h.r))return false;
+ if(r.t==='c')return Math.hypot(x-r.cx,y-r.cy)<r.r;
+ if(r.t==='p')return inPoly(r.P,x,y);
+ return x>r.x0&&x<r.x1&&y>r.y0&&y<r.y1}
+function geom(s,v){
+ if(s.k==='lines'){const p0=s.lines[0].pts[0],dp=(v.sg||1)*(v.ax==='z'?p0[2]:v.ax==='x'?p0[0]:p0[1]);return {s,near:dp,cen:dp,ols:s.lines.map(l=>({P:l.pts.map(p=>v.p(...p)),c:l.closed}))}}
+ const bb=s.b6||s.b,ai=v.ax==='x'?0:v.ax==='y'?2:4,lo=bb[ai],hi=bb[ai+1],sg=v.sg||1,near=sg>0?hi:-lo,cen=sg*(lo+hi)/2;let reg,ol;
+ if(s.k==='bar'&&v.ax==='z'){
+  const a=v.p(s.a[0],s.a[1],0),b=v.p(s.e[0],s.e[1],0),dx=b[0]-a[0],dy=b[1]-a[1],d=Math.hypot(dx,dy)||1,nx=-dy/d*s.w*S/2,ny=dx/d*s.w*S/2;
+  ol=[[a[0]+nx,a[1]+ny],[b[0]+nx,b[1]+ny],[b[0]-nx,b[1]-ny],[a[0]-nx,a[1]-ny]];reg={t:'p',P:ol}}
+ else if(s.k==='sec'&&v.ax==='z'){ol=s.pts.map(q=>v.p(q[0],q[1],0));reg={t:'p',P:hull(ol)}}
+ else if(s.k==='cyl'&&s.ax===v.ax){const c=v.p(...s.c),r=s.r*S,N=segN(r);ol=[];for(let i=0;i<N;i++)ol.push([c[0]+r*Math.cos(i*TAU/N),c[1]+r*Math.sin(i*TAU/N)]);reg={t:'c',cx:c[0],cy:c[1],r}}
+ else{const p=v.p(bb[0],bb[2],bb[4]),q=v.p(bb[1],bb[3],bb[5]),x0=Math.min(p[0],q[0]),x1=Math.max(p[0],q[0]),y0=Math.min(p[1],q[1]),y1=Math.max(p[1],q[1]);
+  ol=[[x0,y0],[x1,y0],[x1,y1],[x0,y1]];reg={t:'r',x0,x1,y0,y1}}
+ if(s.holes&&v.ax==='y')reg.holes=s.holes.map(h=>{const c=v.p(h[0],0,h[1]);return {cx:c[0],cy:c[1],r:h[2]*S}});
+ return {s,near,cen,reg,ols:[{P:ol,c:true}]}}
+function hull(P){P=P.slice().sort((a,b)=>a[0]-b[0]||a[1]-b[1]);const cr=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+ const lo=[];for(const p of P){while(lo.length>1&&cr(lo[lo.length-2],lo[lo.length-1],p)<=0)lo.pop();lo.push(p)}
+ const up=[];for(const p of P.slice().reverse()){while(up.length>1&&cr(up[up.length-2],up[up.length-1],p)<=0)up.pop();up.push(p)}
+ return lo.slice(0,-1).concat(up.slice(0,-1))}
+// Isometric occlusion is exact: a point on an outline is hidden if the ray from it toward the viewer, along (1,1,1), passes through another solid.
+const VD=[1,1,1].map(x=>x/Math.sqrt(3));
+function rayHit(sol,P){
+ let t0=-1e9,t1=1e9;const clip=(c0,c1,sg)=>{ // keep t where sg*(c0+c1*t)>=0
+  const c=sg;if(Math.abs(c1)<1e-9){if(c*c0<0)t1=-1e9;return}
+  const t=-c0/c1;if(c*c1>0)t0=Math.max(t0,t);else t1=Math.min(t1,t)};
+ if(sol.q){
+  const q=sol.q,n=q.length;let ar=0;for(let i=0;i<n;i++){const a=q[i],b=q[(i+1)%n];ar+=a[0]*b[1]-b[0]*a[1]}const sg=ar>0?1:-1;
+  clip(P[2]-sol.z0,VD[2],1);clip(sol.z1-P[2],-VD[2],1);
+  for(let i=0;i<n;i++){const a=q[i],b=q[(i+1)%n],ex=b[0]-a[0],ey=b[1]-a[1];
+   clip(ex*(P[1]-a[1])-ey*(P[0]-a[0]),ex*VD[1]-ey*VD[0],sg)}
+ }else{
+  const ix={x:0,y:1,z:2}[sol.ax],o=[0,1,2].filter(i=>i!==ix);
+  clip(P[ix]-(sol.c[ix]-sol.h),VD[ix],1);clip(sol.c[ix]+sol.h-P[ix],-VD[ix],1);
+  const d0=P[o[0]]-sol.c[o[0]],d1=P[o[1]]-sol.c[o[1]],A=VD[o[0]]**2+VD[o[1]]**2,B=2*(d0*VD[o[0]]+d1*VD[o[1]]),C=d0*d0+d1*d1-sol.r*sol.r,D=B*B-4*A*C;
+  if(D<0)return false;const r=Math.sqrt(D);t0=Math.max(t0,(-B-r)/(2*A));t1=Math.min(t1,(-B+r)/(2*A))}
+ return Math.max(t0,1e-3)<=t1}
+function geomIso(s,v){
+ if(s.k==='lines'){const d=v.d(...s.lines[0].pts[0]);return {s,near:d,cen:d,ols:s.lines.map(l=>({P:l.pts.map(p=>v.p(...p)),P3:l.pts,c:l.closed}))}}
+ const bb=s.b6||s.b;let A,B,conn=[],circ=false,q;
+ if(s.k==='box'){q=[[bb[0],bb[2]],[bb[1],bb[2]],[bb[1],bb[3]],[bb[0],bb[3]]];conn=[0,1,2,3]}
+ else if(s.k==='bar'){const a=s.a,e=s.e,dx=e[0]-a[0],dy=e[1]-a[1],d=Math.hypot(dx,dy)||1,nx=-dy/d*s.w/2,ny=dx/d*s.w/2;
+  q=[[a[0]+nx,a[1]+ny],[e[0]+nx,e[1]+ny],[e[0]-nx,e[1]-ny],[a[0]-nx,a[1]-ny]];conn=[0,1,2,3]}
+ else if(s.k==='sec'){q=s.pts;conn=s.conn||[0,1,q.length-1]}
+ if(q){A=q.map(a=>[a[0],a[1],bb[4]]);B=q.map(a=>[a[0],a[1],bb[5]])
+  if(s.ex){const o=v.p(0,0,0),z=v.p(0,0,1),nn=[-(z[1]-o[1]),z[0]-o[0]],dt=a=>{const p=v.p(...a);return p[0]*nn[0]+p[1]*nn[1]};
+   let hi=0,lo=0;A.forEach((a,i)=>{if(dt(a)>dt(A[hi]))hi=i;if(dt(a)<dt(A[lo]))lo=i});conn=[hi,lo]}} // outer silhouette edges
+ else{circ=true;A=[];B=[];const c=s.c,h=(s.ax==='x'?bb[1]-bb[0]:s.ax==='y'?bb[3]-bb[2]:bb[5]-bb[4])/2;
+  const N=segN(s.r*.7);for(let i=0;i<N;i++){const u=s.r*Math.cos(i*TAU/N),w=s.r*Math.sin(i*TAU/N);
+   if(s.ax==='z'){A.push([c[0]+u,c[1]+w,c[2]-h]);B.push([c[0]+u,c[1]+w,c[2]+h])}
+   else if(s.ax==='y'){A.push([c[0]+u,c[1]-h,c[2]+w]);B.push([c[0]+u,c[1]+h,c[2]+w])}
+   else{A.push([c[0]-h,c[1]+u,c[2]+w]);B.push([c[0]+h,c[1]+u,c[2]+w])}}}
+ const PA=A.map(a=>v.p(...a)),PB=B.map(a=>v.p(...a));
+ const dd=A.concat(B).map(a=>v.d(...a)),near=Math.max(...dd),cen=dd.reduce((t,x)=>t+x,0)/dd.length;
+ const ols=[{P:PA,P3:A,c:true},{P:PB,P3:B,c:true}];
+ if(circ){const m=P=>[P.reduce((t,p)=>t+p[0],0)/P.length,P.reduce((t,p)=>t+p[1],0)/P.length],a=m(PA),b=m(PB),n=[-(b[1]-a[1]),b[0]-a[0]];
+  let lo=0,hi=0;PA.forEach((p,i)=>{const t=p[0]*n[0]+p[1]*n[1];if(t>PA[hi][0]*n[0]+PA[hi][1]*n[1])hi=i;if(t<PA[lo][0]*n[0]+PA[lo][1]*n[1])lo=i});
+  ols.push({P:[PA[hi],PB[hi]],P3:[A[hi],B[hi]]},{P:[PA[lo],PB[lo]],P3:[A[lo],B[lo]]})}
+ else{conn.forEach(i=>ols.push({P:[PA[i],PB[i]],P3:[A[i],B[i]]}));
+  (s.ex||[]).forEach(([x,y])=>{const a=[x,y,bb[4]],b=[x,y,bb[5]];ols.push({P:[v.p(...a),v.p(...b)],P3:[a,b]})})}
+ const sol=q?{q:hull(q),z0:bb[4],z1:bb[5]}:{ax:s.ax,c:s.c,r:s.r,h:(s.ax==='x'?bb[1]-bb[0]:s.ax==='y'?bb[3]-bb[2]:bb[5]-bb[4])/2};
+ return {s,near,cen,sol,reg:{t:'p',P:hull(PA.concat(PB))},ols}}
+const segN=r=>Math.max(10,Math.min(48,Math.ceil(TAU*r/4))); // circle segments ~4px long
+const Q3=[0,0,0];
+function draw(v,list){
+ const g=v.ctx;g.setTransform(1,0,0,1,0,0);g.clearRect(0,0,v.w,v.h);g.setTransform(v.z,0,0,v.z,v.tx,v.ty);g.lineWidth=1.5/v.z;
+const G=list.filter(s=>vis[s.part]&&(s.cn===undefined||cylVis[s.cn])).map(s=>v.iso?geomIso(s,v):geom(s,v));
+ G.forEach(o=>{let a=1e9,b=-1e9,c=1e9,d=-1e9;o.ols.forEach(l=>l.P.forEach(p=>{a=Math.min(a,p[0]);b=Math.max(b,p[0]);c=Math.min(c,p[1]);d=Math.max(d,p[1])}));o.bb=[a-1,b+1,c-1,d+1]});
+ for(const A of G){
+  const blk=STRUCT.has(A.s.part);
+  const occ=blk?[]:G.filter(O=>O!==A&&O.bb[1]>=A.bb[0]&&O.bb[0]<=A.bb[1]&&O.bb[3]>=A.bb[2]&&O.bb[2]<=A.bb[3]&&!STRUCT.has(O.s.part)&&!O.s.nocc&&(v.iso||(O.s.outer?O.near:O.cen)>A.cen+0.01)&&(O.s.part!==A.s.part||O.s.outer||(O.s.cn!==undefined&&A.s.cn!==undefined&&O.s.cn!==A.s.cn)));
+  g.strokeStyle=COL[A.s.part];
+  const md=mode[A.s.part];let run=[],lv=-1;
+  const flush=()=>{if(run.length>1&&!(lv>0&&md==='hidden')){g.setLineDash((lv>0&&md==='solid'?[]:DASH[lv]).map(x=>x/v.z));g.beginPath();g.moveTo(...run[0]);for(let k=1;k<run.length;k++)g.lineTo(...run[k]);g.stroke()}};
+  for(const pl of A.ols){
+   run=[];lv=-1;const P=pl.P,n=P.length,ne=pl.c?n:n-1;
+   for(let e=0;e<ne;e++){
+    const a=P[e],b=P[(e+1)%n],m=Math.max(1,Math.ceil(Math.hypot(b[0]-a[0],b[1]-a[1])/(v.iso?9:5)));
+    for(let k=0;k<m;k++){
+     const p=[a[0]+(b[0]-a[0])*k/m,a[1]+(b[1]-a[1])*k/m],q=[a[0]+(b[0]-a[0])*(k+1)/m,a[1]+(b[1]-a[1])*(k+1)/m];
+     const mx=(p[0]+q[0])/2,my=(p[1]+q[1])/2,tt=(k+.5)/m;let c=0;
+     let q3=null,mask=0;if(pl.P3){const a3=pl.P3[e],b3=pl.P3[(e+1)%n];Q3[0]=a3[0]+(b3[0]-a3[0])*tt;Q3[1]=a3[1]+(b3[1]-a3[1])*tt;Q3[2]=a3[2]+(b3[2]-a3[2])*tt;q3=Q3}
+     for(const O of occ)if(mx>=O.bb[0]&&mx<=O.bb[1]&&my>=O.bb[2]&&my<=O.bb[3]&&(v.iso?rayHit(O.sol,q3):inside(O.reg,mx,my)))mask|=PIX[O.s.part];
+     while(mask){mask&=mask-1;c++} // number of distinct components in front
+     c=blk?0:Math.min(c,3);
+     if(c!==lv){flush();run=[p];lv=c}
+     run.push(q)}}
+   flush()}}
+}
+// ---- Two-stroke: single cylinder, crankcase-scavenged, loop-scavenged piston-port engine (idealized) ----
+// The piston itself is the valve: its crown uncovers the exhaust and transfer windows near BDC,
+// and its skirt uncovers the intake window (into the crankcase) near TDC. The spark fires every revolution.
+const EXP=[95,125],TRP=[95,113],INP=[81,89]; // port window heights (bottom, top)
+const clamp01=x=>Math.max(0,Math.min(1,x));
+function ports2(ph){const th=((ph%TAU)+TAU)%TAU,px=R*Math.sin(th),py=R*Math.cos(th),yp=py+Math.sqrt(L*L-px*px),crown=yp+20,skirt=yp-25; // long skirt, as on real two-stroke pistons
+ return {th,px,py,yp,crown,skirt,ex:clamp01((EXP[1]-crown)/(EXP[1]-EXP[0])),tr:clamp01((TRP[1]-crown)/(TRP[1]-TRP[0])),in:clamp01((skirt-INP[0])/(INP[1]-INP[0]))}}
+function shapes2(ph){
+ const out=[],add=(part,o,fl)=>{o.part=part;if(fl)Object.assign(o,fl);out.push(o)},P=ports2(ph),{th,px,py,yp,crown,skirt}=P;
+ add('block',box([-50,50,40,158,-40,40]));add('block',box([-50,50,-50,40,-30,30])); // cylinder barrel, crankcase
+ add('block',cyl('y',[0,99,0],25,118),{nocc:1});add('block',box([-45,45,-45,40,-25,25]),{nocc:1}); // bore, crankcase cavity
+ add('head',box([-50,50,158,175,-40,40]));add('head',cyl('y',[0,166.5,0],8,17)); // head, plug well
+ add('crank',cyl('z',[0,0,25],8,22));add('crank',cyl('z',[0,0,-25],8,22));
+ add('crank',bar([0,0],[px,py],14,8,14));add('crank',bar([0,0],[px,py],14,-14,-8));add('crank',cyl('z',[px,py,0],6,16));
+ add('crank',sec(th,8,14));add('crank',sec(th,-14,-8));
+ add('rod',bar([px,py],[0,yp],8,-5,5));
+ add('piston',cyl('y',[0,yp-2.5,0],24,45),{outer:1});add('piston',cyl('z',[0,yp,0],4,48));
+ // ports: duct through the wall, plus the uncovered part of each window while it is open
+ add('export',box([25,50,EXP[0],EXP[1],-12,12]));
+ if(P.ex>0)add('export',box([15,25,Math.max(EXP[0],crown),EXP[1],-12,12]));
+ for(const sz of[-1,1]){const z0=sz>0?25:-33,z1=sz>0?33:-25;add('trport',box([-8,8,30,TRP[1],z0,z1]));
+  if(P.tr>0)add('trport',box([-8,8,Math.max(TRP[0],crown),TRP[1],sz>0?15:-25,sz>0?25:-15]))}
+ add('inport',box([-50,-25,INP[0],INP[1],-10,10]));
+ if(P.in>0)add('inport',box([-25,-15,INP[0],Math.min(INP[1],skirt),-10,10]));
+ add('plug',bar([3.5,156],[3.5,153],2,-1,1));add('plug',bar([3.5,153],[0,153],2,-1,1)); // ground electrode
+ add('plug',cyl('y',[0,157,0],1,3));add('plug',cyl('y',[0,166.5,0],4,17));add('plug',cyl('y',[0,178,0],6.5,6));add('plug',cyl('y',[0,188,0],3.5,14));
+ const dg=th*180/Math.PI;if(dg>=345||dg<=12)add('spark',cyl('y',[0,154.75,0],2,1.5)); // fires 15° before TDC
+ return out}
+// ---- Diesel: single cylinder four-stroke, compression ignition (idealized) ----
+// Same valve train as the petrol engine, but a high-compression piston with a bowl in its crown
+// and a fuel injector in place of the spark plug. Fuel is injected around TDC at the end of compression.
+const PARTSD=[['block','Engine block','#9e9e9e'],['head','Cylinder head','#827717'],['cover','Valve cover','#a1887f'],['crank','Crankshaft','#1e88e5'],['rod','Connecting rod','#43a047'],['piston','Piston','#e53935'],['intake','Intake valve','#00acc1'],['exhaust','Exhaust valve','#fb8c00'],['intakecam','Intake cam','#4dd0e1'],['exhaustcam','Exhaust cam','#ffb74d'],['intakerock','Intake rocker','#00838f'],['exhaustrock','Exhaust rocker','#e65100'],['rshaft','Rocker shaft','#8e24aa'],['injector','Fuel injector','#5e35b1'],['spray','Fuel spray','#ff7043'],['sprocket','Timing sprockets','#6d4c41'],['chain','Timing chain','#546e7a']];
+const ZD=-45,inj=deg=>deg>=345&&deg<=375; // chain plane; injection window (cycle degrees)
+const chainAt=(ph,z)=>{const c=chainShape(ph);c.lines=c.lines.map(l=>({pts:l.pts.map(p=>[p[0],p[1],z]),closed:l.closed}));return c};
+function shapesD(ph){
+ const out=[],add=(part,o,fl)=>{o.part=part;if(fl)Object.assign(o,fl);out.push(o)};
+ const th=((ph%TAU)+TAU)%TAU,px=R*Math.sin(th),py=R*Math.cos(th),yp=py+Math.sqrt(L*L-px*px);
+ const pi_=ph/2,pe=ph/2-1.5*Math.PI,ai=rockAngle(-1,pi_),ae=rockAngle(1,pe),li=LT*Math.sin(ai),le=LT*Math.sin(ae);
+ const tip=(sd,a)=>[sd*LT*Math.cos(a),YP-LT*Math.sin(a)],rl=(sd,a)=>[sd*LP*Math.cos(a),YP-LP*Math.sin(a)];
+ add('block',box([-50,50,-50,175,-30,30]));add('block',box([-45,45,-45,40,-25,25]),{nocc:1});add('block',cyl('y',[0,107.5,0],25,135),{nocc:1});
+ add('head',box([-50,50,175,205,-30,30]));add('cover',box([-50,50,205,245,-30,30]));
+ add('head',cyl('x',[-32.5,190,0],5,35));add('head',cyl('x',[32.5,190,0],5,35));            // intake / exhaust ports
+ add('head',cyl('y',[-LT,190,0],4.5,30));add('head',cyl('y',[LT,190,0],4.5,30));add('head',cyl('y',[0,190,0],6,30)); // valve guides, injector well
+ add('crank',cyl('z',[0,0,25],8,22));add('crank',cyl('z',[0,0,-25],8,22));add('crank',cyl('z',[0,0,-43],5,14));
+ add('crank',bar([0,0],[px,py],14,8,14));add('crank',bar([0,0],[px,py],14,-14,-8));add('crank',cyl('z',[px,py,0],6,16));
+ add('crank',sec(th,8,14));add('crank',sec(th,-14,-8));
+ add('rod',bar([px,py],[0,yp],8,-5,5));
+ add('piston',cyl('y',[0,yp+14,0],24,48),{outer:1});add('piston',cyl('y',[0,yp+34,0],12,8));add('piston',cyl('z',[0,yp,0],4,48)); // tall piston (crown 3 below the head at TDC), bowl, wrist pin
+ add('intake',cyl('y',[-LT,193.5-li,0],2.5,41));add('intake',cyl('y',[-LT,173-li,0],5.5,4));
+ add('exhaust',cyl('y',[LT,193.5-le,0],2.5,41));add('exhaust',cyl('y',[LT,173-le,0],5.5,4));
+ add('intakecam',camShape(-CX,CY,pi_,-3,3,-1));add('exhaustcam',camShape(CX,CY,pe,-3,3,1));
+ add('intakecam',cyl('z',[-CX,CY,-12],2.5,76));add('exhaustcam',cyl('z',[CX,CY,-12],2.5,76));
+ add('intakerock',bar([0,YP],tip(-1,ai),4,-2,2));add('intakerock',cyl('z',[...rl(-1,ai),0],RR,4));
+ add('exhaustrock',bar([0,YP],tip(1,ae),4,-2,2));add('exhaustrock',cyl('z',[...rl(1,ae),0],RR,4));
+ add('rshaft',cyl('z',[0,YP,0],2.5,56));
+ add('injector',cyl('y',[0,173.5,0],1.5,5));add('injector',cyl('y',[0,188,0],4,24));add('injector',cyl('y',[0,205.5,0],3,11)); // nozzle, body, fuel fitting
+ add('injector',cyl('z',[0,207,-21],1.2,30));                                                                  // fuel line out through the cover
+ const dg=(((ph*180/Math.PI)%720)+720)%720;
+ if(inj(dg)){for(const sx of[-1,1])add('spray',bar([0,171],[sx*11,165],1.5,-.75,.75));add('spray',cyl('z',[0,167,6],.9,12));add('spray',cyl('z',[0,167,-6],.9,12))} // four spray jets
+ add('sprocket',gearS(0,0,R0,NZ,ph,ZD-2.5,ZD+2.5));add('sprocket',gearS(-CX,CY,RC,2*NZ,pi_,ZD-2.5,ZD+2.5));add('sprocket',gearS(CX,CY,RC,2*NZ,pe,ZD-2.5,ZD+2.5));
+ add('chain',chainAt(ph,ZD),{nocc:1});
+ return out}
+const pc=x=>Math.round(x*100)+'%';
+const ENGINES={
+ four:{label:'4-stroke inline-4',parts:PARTS4,struct:new Set(['block','head','cover']),cyls:4,period:4*Math.PI,shapes,
+  read:ph=>{const dg=ph*180/Math.PI;return 'Cycle angle (cylinder 1): '+Math.round(dg)+'° ('+['intake','compression','power','exhaust'][Math.min(3,Math.floor(dg/180))]+')'}},
+ diesel:{label:'4-stroke diesel single',parts:PARTSD,struct:new Set(['block','head','cover']),cyls:1,period:4*Math.PI,shapes:shapesD,
+  read:ph=>{const dg=ph*180/Math.PI;return 'Cycle angle: '+Math.round(dg)+'° ('+['intake','compression','power','exhaust'][Math.min(3,Math.floor(dg/180))]+')'+(inj(dg)?' · injecting':'')}},
+ two:{label:'2-stroke single',parts:PARTS2,struct:new Set(['block','head']),cyls:1,period:TAU,shapes:shapes2,
+  read:ph=>{const P=ports2(ph);return 'Crank angle: '+Math.round(P.th*180/Math.PI)+'° · open — exhaust '+pc(P.ex)+', transfer '+pc(P.tr)+', intake '+pc(P.in)}}};
+let E=ENGINES.four;
+const tabs=document.getElementById('tabs');
+const showEngine=key=>{E=ENGINES[key];ph=0;buildLegend(E);[...tabs.children].forEach(b=>b.disabled=b.dataset.k===key)};
+Object.entries(ENGINES).forEach(([k,en])=>{const b=document.createElement('button');b.textContent=en.label;b.dataset.k=k;b.onclick=()=>showEngine(k);tabs.append(b)});
+let ph=0,playing=true,last=performance.now();
+showEngine('four');
+const rpm=document.getElementById('rpm');
+rpm.oninput=()=>rv.textContent=rpm.value;
+play.onclick=()=>{playing=!playing;play.textContent=playing?'Pause':'Play'};
+function frame(t){
+ const dt=(t-last)/1000;last=t;
+ if(playing)ph=(ph+dt*rpm.value*Math.PI/30)%E.period;
+ if(playing||dirty){dirty=false;const l=E.shapes(ph);views.forEach(v=>{if(v.vis!==false)draw(v,l)})}
+ ang.textContent=E.read(ph);
+ requestAnimationFrame(frame)}
+requestAnimationFrame(frame);
+</script></body></html>
